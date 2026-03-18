@@ -12,6 +12,8 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
+import requests as http_requests
 from pathlib import Path
 from security_utils import is_production_mode, is_strong_secret, is_strong_drawer_pass
 from memo_utils import get_yesterday_date_str, sanitize_content, extract_memo_from_file
@@ -1239,6 +1241,54 @@ def health():
         "service": "star-office-ui",
         "timestamp": datetime.now().isoformat(),
     })
+
+
+# --- Polygon 链上数据 ---
+_polygon_cache = {"data": None, "ts": 0}
+POLYGON_RPC_URL = os.environ.get("POLYGON_RPC_URL", "")
+POLYGON_CACHE_TTL = 30  # 秒
+
+
+def _fetch_polygon_data():
+    """从 QuickNode RPC 获取 Polygon 链上数据，带 30s 缓存"""
+    now = time.time()
+    if _polygon_cache["data"] and (now - _polygon_cache["ts"]) < POLYGON_CACHE_TTL:
+        return _polygon_cache["data"]
+
+    if not POLYGON_RPC_URL:
+        return {"error": "POLYGON_RPC_URL not configured", "updated_at": datetime.now().isoformat()}
+
+    try:
+        def _rpc(method, params=None):
+            r = http_requests.post(POLYGON_RPC_URL, json={
+                "jsonrpc": "2.0", "method": method, "params": params or [], "id": 1
+            }, timeout=10)
+            return r.json().get("result", "0x0")
+
+        block_hex = _rpc("eth_blockNumber")
+        gas_hex = _rpc("eth_gasPrice")
+
+        block_num = int(block_hex, 16)
+        gas_gwei = round(int(gas_hex, 16) / 1e9, 2)
+
+        data = {
+            "block": block_num,
+            "gas_gwei": gas_gwei,
+            "chain_id": 137,
+            "updated_at": datetime.now().isoformat(),
+        }
+        _polygon_cache["data"] = data
+        _polygon_cache["ts"] = now
+        return data
+    except Exception as e:
+        return {"error": str(e), "updated_at": datetime.now().isoformat()}
+
+
+@app.route("/polygon-data", methods=["GET"])
+def polygon_data():
+    """获取 Polygon 链上实时数据"""
+    data = _fetch_polygon_data()
+    return jsonify(data)
 
 
 @app.route("/yesterday-memo", methods=["GET"])
